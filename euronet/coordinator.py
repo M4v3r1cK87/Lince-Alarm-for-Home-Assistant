@@ -85,6 +85,10 @@ class EuroNetCoordinator(DataUpdateCoordinator):
         self._zone_config_retry_task: Optional[asyncio.Task] = None
         self._zone_config_lock = asyncio.Lock()  # Lock per evitare caricamenti paralleli
         
+        # Lock per evitare richieste HTTP parallele alla centrale
+        # La centrale non gestisce bene richieste concorrenti
+        self._polling_lock = asyncio.Lock()
+        
         # Stato precedente per rilevare transizioni allarme
         self._previous_alarm_state = False
         # Stato precedente ARM per rilevare transizioni arm/disarm (gstate: "G1,G2", etc.)
@@ -531,71 +535,83 @@ class EuroNetCoordinator(DataUpdateCoordinator):
         NON richiede il login con codice installatore - quello serve solo per:
         - Caricare configurazioni zone (all'avvio/reload)
         - Eseguire comandi arm/disarm
+        
+        Usa un lock per evitare richieste parallele alla centrale che potrebbero
+        saturare i log e sovraccaricare il dispositivo.
         """
-        try:
-            # Esegui operazioni sincrone in executor
-            # get_stato_centrale usa HTTP Basic Auth, non richiede codice installatore
-            stato = await self.hass.async_add_executor_job(
-                self.client.get_stato_centrale
-            )
+        # Se c'è già un polling in corso, salta questo ciclo
+        # Questo evita l'accumulo di richieste quando la centrale è lenta o offline
+        if self._polling_lock.locked():
+            # Ritorna i dati precedenti se disponibili, altrimenti solleva errore
+            if self._systems:
+                return self._systems
+            raise UpdateFailed("Polling già in corso")
+        
+        async with self._polling_lock:
+            try:
+                # Esegui operazioni sincrone in executor
+                # get_stato_centrale usa HTTP Basic Auth, non richiede codice installatore
+                stato = await self.hass.async_add_executor_job(
+                    self.client.get_stato_centrale
+                )
+                
+                if not stato:
+                    # Errore di comunicazione (rete, timeout, centrale occupata)
+                    # NON è un problema di login con codice - non tentare re-login
+                    raise UpdateFailed("Impossibile leggere stato centrale")
             
-            if not stato:
-                # Errore di comunicazione (rete, timeout, centrale occupata)
-                # NON è un problema di login con codice - non tentare re-login
-                raise UpdateFailed("Impossibile leggere stato centrale")
-            
-            # Leggi zone filari
-            zone_filari = await self.hass.async_add_executor_job(
-                self.client.get_stato_zone_filari
-            )
-            
-            # Leggi zone radio (tutti i gruppi necessari)
-            zone_radio = []
-            if self.num_zone_radio > 0:
-                # Calcola quanti gruppi leggere (10 zone per gruppo)
-                num_gruppi = (self.num_zone_radio + 9) // 10  # arrotonda per eccesso
-                for gruppo in range(num_gruppi):
-                    zone_gruppo = await self.hass.async_add_executor_job(
-                        self.client.get_stato_zone_radio, gruppo
+                # Leggi zone filari
+                zone_filari = await self.hass.async_add_executor_job(
+                    self.client.get_stato_zone_filari
+                )
+                
+                # Leggi zone radio (tutti i gruppi necessari)
+                zone_radio = []
+                if self.num_zone_radio > 0:
+                    # Calcola quanti gruppi leggere (10 zone per gruppo)
+                    num_gruppi = (self.num_zone_radio + 9) // 10  # arrotonda per eccesso
+                    for gruppo in range(num_gruppi):
+                        zone_gruppo = await self.hass.async_add_executor_job(
+                            self.client.get_stato_zone_radio, gruppo
+                        )
+                        zone_radio.extend(zone_gruppo)
+                
+                # Costruisci struttura dati compatibile con l'integrazione esistente
+                # Simuliamo un "sistema" cloud-like per compatibilità
+                system_data = self._build_system_data(stato, zone_filari, zone_radio)
+                
+                # Rileva transizione a stato ALLARME e invia notifica
+                current_alarm_state = system_data.get("allarme", False)
+                if current_alarm_state and not self._previous_alarm_state:
+                    # Transizione da non-allarme a allarme -> TRIGGERED!
+                    _LOGGER.warning("Rilevato allarme scattato! Invio notifica...")
+                    # Schedula invio notifica (non bloccare l'update)
+                    self.hass.async_create_task(
+                        self._send_triggered_notification(system_data)
                     )
-                    zone_radio.extend(zone_gruppo)
-            
-            # Costruisci struttura dati compatibile con l'integrazione esistente
-            # Simuliamo un "sistema" cloud-like per compatibilità
-            system_data = self._build_system_data(stato, zone_filari, zone_radio)
-            
-            # Rileva transizione a stato ALLARME e invia notifica
-            current_alarm_state = system_data.get("allarme", False)
-            if current_alarm_state and not self._previous_alarm_state:
-                # Transizione da non-allarme a allarme -> TRIGGERED!
-                _LOGGER.warning("Rilevato allarme scattato! Invio notifica...")
-                # Schedula invio notifica (non bloccare l'update)
-                self.hass.async_create_task(
-                    self._send_triggered_notification(system_data)
-                )
-            self._previous_alarm_state = current_alarm_state
-            
-            # Rileva transizione ARM/DISARM (indipendentemente dalla fonte)
-            current_gstate = system_data.get("gstate", "")
-            if self._previous_gstate is not None and current_gstate != self._previous_gstate:
-                # Lo stato è cambiato - invia notifica appropriata
-                self.hass.async_create_task(
-                    self._send_arm_disarm_notification(self._previous_gstate, current_gstate, system_data)
-                )
-            self._previous_gstate = current_gstate
-            
-            self._systems = [system_data]
-            
-            # IMPORTANTE: restituisce direttamente la lista dei sistemi
-            # per compatibilità con le piattaforme che iterano su coordinator.data
-            return self._systems
-            
-        except UpdateFailed:
-            # Re-raise senza log aggiuntivo (già loggato sopra)
-            raise
-        except Exception as e:
-            _LOGGER.error(f"Errore aggiornamento dati locali: {e}")
-            raise UpdateFailed(f"Errore comunicazione: {e}")
+                self._previous_alarm_state = current_alarm_state
+                
+                # Rileva transizione ARM/DISARM (indipendentemente dalla fonte)
+                current_gstate = system_data.get("gstate", "")
+                if self._previous_gstate is not None and current_gstate != self._previous_gstate:
+                    # Lo stato è cambiato - invia notifica appropriata
+                    self.hass.async_create_task(
+                        self._send_arm_disarm_notification(self._previous_gstate, current_gstate, system_data)
+                    )
+                self._previous_gstate = current_gstate
+                
+                self._systems = [system_data]
+                
+                # IMPORTANTE: restituisce direttamente la lista dei sistemi
+                # per compatibilità con le piattaforme che iterano su coordinator.data
+                return self._systems
+                
+            except UpdateFailed:
+                # Re-raise senza log aggiuntivo (già loggato sopra)
+                raise
+            except Exception as e:
+                _LOGGER.error(f"Errore aggiornamento dati locali: {e}")
+                raise UpdateFailed(f"Errore comunicazione: {e}")
     
     def _build_system_data(self, stato: StatoCentrale, zone_filari: list, zone_radio: list | None = None) -> dict:
         """Costruisce struttura dati sistema compatibile con cloud."""

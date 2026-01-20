@@ -10,6 +10,7 @@ import base64
 import re
 import time
 import logging
+import threading
 import requests
 import xml.etree.ElementTree as ET
 from typing import Dict, Any, Optional, List
@@ -435,53 +436,63 @@ class EuroNetClient:
             "Content-Type": "application/x-www-form-urlencoded"
         })
         
+        # Lock per serializzare le richieste HTTP
+        # La centrale non gestisce bene richieste concorrenti
+        self._request_lock = threading.Lock()
+        
     # ========================================================================
     # METODI PRIVATI
     # ========================================================================
     
     def _post(self, endpoint: str, data: str) -> Optional[str]:
-        """Esegue POST request."""
+        """Esegue POST request con lock per serializzare le richieste."""
         url = f"{self.base_url}/{endpoint}"
-        try:
-            response = self.session.post(url, data=data, timeout=self.timeout)
-            if response.status_code == 200:
-                # Verifica se dopo i redirect siamo finiti su NoLogin (sessione scaduta)
-                if "NoLogin" in response.url or "NoLogin" in response.text[:500]:
-                    _LOGGER.debug(f"Sessione scaduta su {endpoint} - redirect a NoLogin")
-                    return None
-                return response.text
-            # HTTP non-200: logga come debug se è un redirect, error altrimenti
-            if response.status_code in (301, 302, 303, 307, 308):
-                _LOGGER.debug(f"HTTP {response.status_code} redirect su {endpoint} -> {response.url}")
-            else:
-                _LOGGER.warning(f"HTTP {response.status_code} su {endpoint}. Response: {response.text[:200]}")
-            return None
-        except requests.exceptions.RequestException as e:
-            _LOGGER.warning(f"Errore connessione POST {endpoint}: {e}")
-            return None
+        
+        # Usa il lock per evitare richieste parallele alla centrale
+        with self._request_lock:
+            try:
+                response = self.session.post(url, data=data, timeout=self.timeout)
+                if response.status_code == 200:
+                    # Verifica se dopo i redirect siamo finiti su NoLogin (sessione scaduta)
+                    if "NoLogin" in response.url or "NoLogin" in response.text[:500]:
+                        _LOGGER.debug(f"Sessione scaduta su {endpoint} - redirect a NoLogin")
+                        return None
+                    return response.text
+                # HTTP non-200: logga come debug se è un redirect, error altrimenti
+                if response.status_code in (301, 302, 303, 307, 308):
+                    _LOGGER.debug(f"HTTP {response.status_code} redirect su {endpoint} -> {response.url}")
+                else:
+                    _LOGGER.warning(f"HTTP {response.status_code} su {endpoint}. Response: {response.text[:200]}")
+                return None
+            except requests.exceptions.RequestException as e:
+                _LOGGER.debug(f"Errore connessione POST {endpoint}: {e}")
+                return None
             
     def _get(self, endpoint: str, params: str = "") -> Optional[str]:
-        """Esegue GET request."""
+        """Esegue GET request con lock per serializzare le richieste."""
         url = f"{self.base_url}/{endpoint}"
         if params:
             url = f"{url}?{params}"
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-            if response.status_code == 200:
-                # Verifica se dopo i redirect siamo finiti su NoLogin (sessione scaduta)
-                if "NoLogin" in response.url or "NoLogin" in response.text[:500]:
-                    _LOGGER.debug(f"Sessione scaduta su {endpoint} - redirect a NoLogin")
-                    return None
-                return response.text
-            # HTTP non-200: logga come debug se è un redirect, error altrimenti
-            if response.status_code in (301, 302, 303, 307, 308):
-                _LOGGER.debug(f"HTTP {response.status_code} redirect su {endpoint} -> {response.url}")
-            else:
-                _LOGGER.warning(f"HTTP {response.status_code} su {endpoint}. Response: {response.text[:200]}")
-            return None
-        except requests.exceptions.RequestException as e:
-            _LOGGER.warning(f"Errore connessione GET {endpoint}: {e}")
-            return None
+        
+        # Usa il lock per evitare richieste parallele alla centrale
+        with self._request_lock:
+            try:
+                response = self.session.get(url, timeout=self.timeout)
+                if response.status_code == 200:
+                    # Verifica se dopo i redirect siamo finiti su NoLogin (sessione scaduta)
+                    if "NoLogin" in response.url or "NoLogin" in response.text[:500]:
+                        _LOGGER.debug(f"Sessione scaduta su {endpoint} - redirect a NoLogin")
+                        return None
+                    return response.text
+                # HTTP non-200: logga come debug se è un redirect, error altrimenti
+                if response.status_code in (301, 302, 303, 307, 308):
+                    _LOGGER.debug(f"HTTP {response.status_code} redirect su {endpoint} -> {response.url}")
+                else:
+                    _LOGGER.warning(f"HTTP {response.status_code} su {endpoint}. Response: {response.text[:200]}")
+                return None
+            except requests.exceptions.RequestException as e:
+                _LOGGER.debug(f"Errore connessione GET {endpoint}: {e}")
+                return None
             
     def _parse_xml(self, xml_content: str) -> Optional[Dict[str, str]]:
         """Parsa risposta XML base."""

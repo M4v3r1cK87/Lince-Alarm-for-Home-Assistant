@@ -66,17 +66,19 @@ DEFAULT_ARM_PROFILES = {
 # ============================================================================
 
 CONF_POLLING_INTERVAL = "polling_interval"
-DEFAULT_POLLING_INTERVAL_MS = 500  # 500ms default
-MIN_POLLING_INTERVAL_MS = 250      # 250ms minimum
-MAX_POLLING_INTERVAL_MS = 60000    # 60s maximum
+DEFAULT_POLLING_INTERVAL_MS = 500   # 500ms default
+MIN_POLLING_INTERVAL_MS = 250       # 250ms minimum
+MAX_POLLING_INTERVAL_MS = 60000     # 60s maximum
 
 # Polling interval options for selector (in ms)
 POLLING_INTERVAL_OPTIONS = [
     250,    # 250ms - fastest
     500,    # 500ms - default
+    750,    # 750ms
     1000,   # 1s
     2000,   # 2s
-    5000,   # 5s
+    3000,   # 3s
+    5000,   # 5s - consigliato per GR868
     10000,  # 10s
     30000,  # 30s
     60000,  # 60s - slowest

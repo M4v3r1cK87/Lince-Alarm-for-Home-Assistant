@@ -199,6 +199,14 @@ class EuroNetBinarySensor(EuroNetBaseBinarySensor):
         """Restituisce True se il sensore è attivo."""
         system = self._get_system_data()
         if system:
+            # Caso speciale: centrale_armata è True se almeno un programma è attivo
+            if self._data_key == "centrale_armata":
+                g1 = system.get("g1", False)
+                g2 = system.get("g2", False)
+                g3 = system.get("g3", False)
+                gext = system.get("gext", False)
+                return g1 or g2 or g3 or gext
+            
             value = system.get(self._data_key)
             if value is not None:
                 return not value if self._invert else value

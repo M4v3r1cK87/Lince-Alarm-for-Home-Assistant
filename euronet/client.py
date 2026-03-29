@@ -440,10 +440,43 @@ class EuroNetClient:
         # La centrale non gestisce bene richieste concorrenti
         self._request_lock = threading.Lock()
         
+        # Contatore redirect consecutivi per auto-recovery sessione
+        # Quando raggiunge la soglia, viene eseguito un force-reset della sessione
+        self._consecutive_redirect_failures = 0
+        self._REDIRECT_RESET_THRESHOLD = 3
+        
     # ========================================================================
     # METODI PRIVATI
     # ========================================================================
     
+    def _force_session_reset_raw(self) -> None:
+        """
+        Forza il reset della sessione web della centrale.
+        
+        Chiama POST NoLogin.html con Login=force per disconnettere qualsiasi
+        utente attualmente connesso (inclusa la sessione scaduta di HA stessa).
+        
+        ATTENZIONE: non usa _request_lock né _post/_get perché viene chiamato
+        dall'interno di _get/_post mentre il lock è già acquisito.
+        """
+        try:
+            reset_url = f"{self.base_url}/NoLogin.html"
+            _LOGGER.warning(
+                "Troppi redirect consecutivi (%d), forzo reset sessione HTTP "
+                "(POST NoLogin.html Login=force)",
+                self._consecutive_redirect_failures
+            )
+            self.session.post(
+                reset_url,
+                data="Login=force",
+                timeout=self.timeout,
+                allow_redirects=False
+            )
+            # Attesa per permettere alla centrale di completare il reset
+            time.sleep(1.2)
+        except Exception as e:
+            _LOGGER.debug("Errore durante force session reset: %s", e)
+
     def _post(self, endpoint: str, data: str) -> Optional[str]:
         """Esegue POST request con lock per serializzare le richieste."""
         url = f"{self.base_url}/{endpoint}"
@@ -457,10 +490,16 @@ class EuroNetClient:
                     if "NoLogin" in response.url or "NoLogin" in response.text[:500]:
                         _LOGGER.debug(f"Sessione scaduta su {endpoint} - redirect a NoLogin")
                         return None
+                    # Successo: reset contatore redirect
+                    self._consecutive_redirect_failures = 0
                     return response.text
                 # HTTP non-200: logga come debug se è un redirect, error altrimenti
                 if response.status_code in (301, 302, 303, 307, 308):
+                    self._consecutive_redirect_failures += 1
                     _LOGGER.debug(f"HTTP {response.status_code} redirect su {endpoint} -> {response.url}")
+                    if self._consecutive_redirect_failures >= self._REDIRECT_RESET_THRESHOLD:
+                        self._force_session_reset_raw()
+                        self._consecutive_redirect_failures = 0
                 else:
                     _LOGGER.warning(f"HTTP {response.status_code} su {endpoint}. Response: {response.text[:200]}")
                 return None
@@ -483,10 +522,16 @@ class EuroNetClient:
                     if "NoLogin" in response.url or "NoLogin" in response.text[:500]:
                         _LOGGER.debug(f"Sessione scaduta su {endpoint} - redirect a NoLogin")
                         return None
+                    # Successo: reset contatore redirect
+                    self._consecutive_redirect_failures = 0
                     return response.text
                 # HTTP non-200: logga come debug se è un redirect, error altrimenti
                 if response.status_code in (301, 302, 303, 307, 308):
+                    self._consecutive_redirect_failures += 1
                     _LOGGER.debug(f"HTTP {response.status_code} redirect su {endpoint} -> {response.url}")
+                    if self._consecutive_redirect_failures >= self._REDIRECT_RESET_THRESHOLD:
+                        self._force_session_reset_raw()
+                        self._consecutive_redirect_failures = 0
                 else:
                     _LOGGER.warning(f"HTTP {response.status_code} su {endpoint}. Response: {response.text[:200]}")
                 return None

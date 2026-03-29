@@ -84,12 +84,14 @@
         "data": {
           "num_filari": "Numero zone filari",
           "num_radio": "Numero zone radio",
+          "user_code": "Codice utente (opzionale)",
           "home": "In casa",
           "away": "Fuori casa",
           "night": "Notte",
           "vacation": "Vacanza"
         },
         "data_description": {
+          "user_code": "Solo per centrali Gold: inserisci un codice utente per caricare automaticamente i nomi delle zone configurate nella centrale.",
           "home": "Seleziona uno o più programmi per la modalità In casa",
           "away": "Seleziona uno o più programmi per la modalità Fuori casa",
           "night": "Seleziona uno o più programmi per la modalità Notte",

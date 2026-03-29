@@ -38,6 +38,7 @@ from .euronet.const import (
     DEFAULT_POLLING_INTERVAL_MS,
     POLLING_INTERVAL_OPTIONS,
 )
+from .gold.const import CONF_USER_CODE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -533,6 +534,7 @@ class LinceGoldCloudOptionsFlow(OptionsFlowWithReload):
             "away": list(prof.get("away", [])),
             "night": list(prof.get("night", [])),
             "vacation": list(prof.get("vacation", [])),
+            CONF_USER_CODE: cfg.get(CONF_USER_CODE, ""),  # Codice utente Gold
         }
 
         # Filtra profili per rimuovere programmi non supportati
@@ -540,11 +542,21 @@ class LinceGoldCloudOptionsFlow(OptionsFlowWithReload):
             defaults[profile] = [p for p in defaults[profile] if p in PROGRAMS]
 
         # Schema base con limiti brand-specific
-        base_schema = vol.Schema({
+        schema_fields = {
             vol.Required("num_filari", default=defaults["num_filari"]): 
                 vol.All(vol.Coerce(int), vol.Range(min=0, max=MAX_FILARI_BRAND)),
             vol.Required("num_radio", default=defaults["num_radio"]): 
                 vol.All(vol.Coerce(int), vol.Range(min=0, max=MAX_RADIO_BRAND)),
+        }
+        
+        # Aggiungi campo codice utente solo per centrali Gold
+        if brand == "lince-gold":
+            schema_fields[vol.Optional(CONF_USER_CODE, default=defaults[CONF_USER_CODE])] = TextSelector(
+                TextSelectorConfig(type=TextSelectorType.PASSWORD)
+            )
+        
+        # Aggiungi campi profili ARM
+        schema_fields.update({
             vol.Optional("home", default=defaults["home"]): SelectSelector(
                 SelectSelectorConfig(
                     options=prog_options, 
@@ -574,6 +586,8 @@ class LinceGoldCloudOptionsFlow(OptionsFlowWithReload):
                 )
             ),
         })
+        
+        base_schema = vol.Schema(schema_fields)
 
         # Se l'utente ha inviato il form, valida e salva
         if user_input is not None:
@@ -638,6 +652,10 @@ class LinceGoldCloudOptionsFlow(OptionsFlowWithReload):
                     "night": selected["night"],
                     "vacation": selected["vacation"],
                 }
+                # Aggiungi user_code se Gold
+                if brand == "lince-gold":
+                    suggested[CONF_USER_CODE] = user_input.get(CONF_USER_CODE, "")
+                    
                 schema_with_suggested = self.add_suggested_values_to_schema(base_schema, suggested)
                 return self.async_show_form(
                     step_id="edit_details",
@@ -653,11 +671,48 @@ class LinceGoldCloudOptionsFlow(OptionsFlowWithReload):
                 )
 
             # Nessun duplicato -> salva configurazione
-            systems_config[sid_str] = {
+            system_cfg = {
                 "num_filari": nfil, 
                 "num_radio": nrad,
                 "brand": brand  # Salva anche il brand nella config
             }
+            
+            # Gestisci codice utente Gold per ottenere nomi zone
+            if brand == "lince-gold":
+                user_code = user_input.get(CONF_USER_CODE, "").strip()
+                if user_code:
+                    system_cfg[CONF_USER_CODE] = user_code
+                    
+                    # Prova a ottenere i nomi delle zone dall'API
+                    try:
+                        # Ottieni id_centrale dal sistema
+                        id_centrale = system.get("id_centrale") if system else None
+                        if id_centrale:
+                            from .gold.api import GoldAPI
+                            email = self._entry.data.get("email")
+                            password = self._entry.data.get("password")
+                            gold_api = GoldAPI(self.hass, email, password)
+                            await gold_api.login()
+                            
+                            login_data = await gold_api.gold_login_with_code(id_centrale, user_code)
+                            if login_data:
+                                zone_names = gold_api.parse_zone_names_from_login(login_data)
+                                system_cfg["zone_names"] = zone_names
+                                _LOGGER.info(f"Nomi zone Gold caricati per centrale {sid}: "
+                                           f"filari={len(zone_names.get('filari', {}))}, "
+                                           f"radio={len(zone_names.get('radio', {}))}")
+                            else:
+                                _LOGGER.warning(f"Login Gold con codice fallita per centrale {sid}")
+                        else:
+                            _LOGGER.warning(f"id_centrale non trovato per sistema Gold {sid}")
+                    except Exception as e:
+                        _LOGGER.error(f"Errore durante caricamento nomi zone Gold: {e}")
+                else:
+                    # Rimuovi nomi zone se codice rimosso
+                    system_cfg.pop(CONF_USER_CODE, None)
+                    system_cfg.pop("zone_names", None)
+            
+            systems_config[sid_str] = system_cfg
             arm_profiles[sid_str] = selected
             
             _LOGGER.debug(f"Salvando config per centrale {sid} (brand: {brand}): "

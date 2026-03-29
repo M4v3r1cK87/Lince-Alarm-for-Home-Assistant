@@ -1,5 +1,12 @@
 """Costanti specifiche per Lince Gold."""
 
+# Configuration keys
+CONF_USER_CODE = "user_code"  # Codice utente per ottenere nomi zone
+
+# API endpoints
+API_GOLD_LOGIN_URL = "https://goldcloud.lince.net/api/centrale/login"
+API_GOLD_SEND_COMM_URL = "https://goldcloud.lince.net/api/centrale/send_comm"
+
 # Zone limits - SPECIFICI PER GOLD
 MAX_FILARI = 7
 MAX_RADIO = 64

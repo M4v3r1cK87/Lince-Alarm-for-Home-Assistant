@@ -42,7 +42,7 @@ programma_g3 = False
 programma_gext = False
 timer_uscita_g1_g2_g3 = False
 timer_uscita_gext = False
-centrale_allarmata = False
+centrale_armata = False
 
 
 def setup_europlus_binary_sensors(system, coordinator, api, config_entry, hass):
@@ -165,27 +165,27 @@ def _setup_europlus_buscomms(coordinator, system, api, row_id, centrale_id, cent
     if row_id not in api.buscomm_sensors:
         api.buscomm_sensors[row_id] = {}
     
-    # Sensore centrale allarmata (logica SPECIFICA Europlus)
-    centrale_allarmata_unique_id = f"lincebuscomms_{row_id}_centrale_allarmata"
-    if centrale_allarmata_unique_id not in api.buscomm_sensors[row_id]:
+    # Sensore centrale armata (logica SPECIFICA Europlus)
+    centrale_armata_unique_id = f"lincebuscomms_{row_id}_centrale_armata"
+    if centrale_armata_unique_id not in api.buscomm_sensors[row_id]:
         entity = EuroplusBuscommBinarySensor(
             coordinator=coordinator,
             system=None,
             row_id=row_id,
             centrale_id=centrale_id,
             centrale_name=centrale_name,
-            key="centrale_allarmata",
+            key="centrale_armata",
             configs={
                 "entity_type": "binary_sensor",
-                "friendly_name": "Centrale Allarmata",
+                "friendly_name": "Centrale Armata",
                 "device_class": "lock",
-                "inverted": True,  # Allarmata=True → is_on=False → "Locked"
-                "icon_on": "mdi:shield-lock-open-outline",  # Non allarmata (invertito)
-                "icon_off": "mdi:shield-lock",  # Allarmata (invertito)
+                "inverted": True,  # Armata=True → is_on=False → "Locked"
+                "icon_on": "mdi:shield-lock-open-outline",  # Non Armata (invertito)
+                "icon_off": "mdi:shield-lock",  # Armata (invertito)
             }
         )
         entities.append(entity)
-        api.buscomm_sensors[row_id][centrale_allarmata_unique_id] = entity
+        api.buscomm_sensors[row_id][centrale_armata_unique_id] = entity
     
     # Altri sensori dal mapping EUROPLUS con ricorsione
     entities.extend(
@@ -276,13 +276,13 @@ def update_europlus_buscomm_binarysensors(api, row_id, keys, isStepRecursive=Fal
                         elif key == "tempo_out_gext":
                             timer_uscita_gext = value
         
-        # Aggiorna centrale allarmata
+        # Aggiorna centrale armata
         if not isStepRecursive:
-            unique_id = f"lincebuscomms_{row_id}_centrale_allarmata"
+            unique_id = f"lincebuscomms_{row_id}_centrale_armata"
             entity = api.buscomm_sensors[row_id].get(unique_id)
             if entity and hasattr(entity, 'update_values'):
-                allarmata = (programma_g1 or programma_g2 or programma_g3 or programma_gext) and not (timer_uscita_g1_g2_g3 or timer_uscita_gext)
-                entity.update_values(allarmata)
+                armata = (programma_g1 or programma_g2 or programma_g3 or programma_gext) and not (timer_uscita_g1_g2_g3 or timer_uscita_gext)
+                entity.update_values(armata)
 
 
 # ========== CLASSI SENSOR ==========

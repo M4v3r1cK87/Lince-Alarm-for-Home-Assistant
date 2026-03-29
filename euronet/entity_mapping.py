@@ -148,6 +148,14 @@ BINARY_SENSOR_CENTRALE_MAPPING = {
         "icon_off": "mdi:shield-lock",
     },
     
+    # Stato armamento aggregato
+    "centrale_armata": {
+        "friendly_name": "Centrale Armata",
+        "icon_on": "mdi:shield-check",
+        "icon_off": "mdi:shield-off-outline",
+        "computed": True,  # Indica che è un valore calcolato
+    },
+    
     # Stato generale
     "modo_servizio": {
         "friendly_name": "Modo Servizio",

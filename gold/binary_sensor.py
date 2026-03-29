@@ -45,7 +45,7 @@ timer_uscita_gext = None
 def setup_gold_binary_sensors(system, coordinator, api, config_entry, hass):
     """
     Setup COMPLETO dei binary sensors per Gold.
-    Per ora implementazione minima, DA COMPLETARE quando avremo le specifiche Gold.
+    Include sensori sistema, buscomm e sensori radio.
     """
     entities = []
     row_id = system["id"]
@@ -60,21 +60,57 @@ def setup_gold_binary_sensors(system, coordinator, api, config_entry, hass):
     
     _LOGGER.info(f"Setup Gold binary sensors per sistema {row_id}")
     
-    # IMPORTANTE: Avvia la connessione socket per ricevere gli aggiornamenti di stato
-    # In Gold, dato che l'alarm panel non è ancora implementato, la socket va avviata qui
-    async def start_socket():
+    # Funzione asincrona per avvio socket e creazione sensori radio
+    async def start_socket_and_create_radio_sensors():
         try:
+            # Avvia connessione socket
             if hasattr(api, 'start_socket_connection'):
                 if not api.is_socket_connected(row_id):
                     _LOGGER.info(f"[{row_id}] Avvio connessione socket Gold...")
                     await api.start_socket_connection(row_id)
                 else:
                     _LOGGER.debug(f"[{row_id}] Socket Gold già connessa")
+            
+            # Prova a recuperare physical map se abbiamo user_code
+            user_code = config_entry.options.get("user_code") or config_entry.data.get("user_code")
+            if user_code and hasattr(api, 'fetch_and_cache_physical_map'):
+                id_centrale_str = str(centrale_id)
+                _LOGGER.info(f"[{row_id}] Recupero physical map con user_code...")
+                physical_map = await api.fetch_and_cache_physical_map(id_centrale_str, user_code)
+                
+                if physical_map:
+                    # Crea sensori radio
+                    radio_sensors = setup_gold_radio_sensors(
+                        coordinator=coordinator,
+                        row_id=row_id,
+                        centrale_id=str(centrale_id),
+                        centrale_name=centrale_name,
+                        physical_map=physical_map,
+                        api=api
+                    )
+                    
+                    if radio_sensors:
+                        _LOGGER.info(f"[{row_id}] Creati {len(radio_sensors)} sensori radio Gold")
+                        # Aggiungi le entità a Home Assistant
+                        # Nota: questo richiede che platform_setup sia chiamato di nuovo
+                        # In alternativa, possiamo usare async_add_entities se disponibile
+                        hass.bus.async_fire(
+                            "lince_gold_radio_sensors_ready",
+                            {
+                                "row_id": row_id,
+                                "sensor_count": len(radio_sensors)
+                            }
+                        )
+                else:
+                    _LOGGER.warning(f"[{row_id}] Physical map non disponibile, sensori radio non creati")
+            else:
+                _LOGGER.debug(f"[{row_id}] User code non configurato, sensori radio non disponibili")
+                
         except Exception as e:
             _LOGGER.error(f"[{row_id}] Errore avvio socket Gold: {e}")
     
     # Schedula l'avvio della socket in modo asincrono
-    hass.async_create_task(start_socket())
+    hass.async_create_task(start_socket_and_create_radio_sensors())
     
     # Per ora Gold usa solo i sensori comuni dal sistema
     # (questi sono condivisi tra tutti i brand)
@@ -330,3 +366,249 @@ class GoldBuscommBinarySensor(CoordinatorEntity, BinarySensorEntity):
             self._value = value
         
         self.safe_update()
+
+
+# ============================================================================
+# GOLD RADIO BINARY SENSOR - Sensori radio via WebSocket
+# ============================================================================
+
+# Mapping tipo periferica -> device class
+RADIO_TYPE_DEVICE_CLASS = {
+    1: None,  # Radiocomando - no binary sensor
+    2: BinarySensorDeviceClass.MOTION,  # Movimento/PIR
+    3: BinarySensorDeviceClass.DOOR,  # Contatto (magnetico o tapparella)
+    4: None,  # Sirena - no binary sensor
+    5: None,  # Uscita - no binary sensor
+    6: BinarySensorDeviceClass.SAFETY,  # Tecnologico (allagamento, fumo, gas)
+    7: None,  # Ripetitore - no binary sensor
+    8: None,  # Nebbiogeno - no binary sensor
+}
+
+# Specializzazioni tipo 6 (tecnologico)
+TECNOLOGICO_DEVICE_CLASS = {
+    0: BinarySensorDeviceClass.MOISTURE,  # Allagamento
+    1: BinarySensorDeviceClass.SMOKE,  # Fumo
+    2: BinarySensorDeviceClass.GAS,  # Gas
+    3: BinarySensorDeviceClass.POWER,  # Corrente
+}
+
+# Specializzazioni tipo 3 (contatto)
+CONTATTO_DEVICE_CLASS = {
+    0: BinarySensorDeviceClass.DOOR,  # Magnetico
+    1: BinarySensorDeviceClass.VIBRATION,  # Tapparella/Tenda
+}
+
+
+class GoldRadioBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Binary sensor per dispositivi radio Gold via WebSocket."""
+    
+    def __init__(
+        self,
+        coordinator,
+        row_id: int,
+        centrale_id: str,
+        centrale_name: str,
+        device_index: int,
+        device_config: dict,
+        api
+    ):
+        """Initialize Gold radio binary sensor."""
+        super().__init__(coordinator)
+        
+        self._row_id = row_id
+        self._centrale_id = centrale_id
+        self._centrale_name = centrale_name
+        self._device_index = device_index
+        self._api = api
+        
+        # Info dispositivo dalla physical map
+        self._device_config = device_config
+        self._num_tipo = device_config.get("num_tipo_periferica", 0)
+        self._num_spec = device_config.get("num_spec_periferica", 0)
+        self._device_name = device_config.get("nome", f"Radio {device_index}")
+        
+        # Stato
+        self._is_triggered = False
+        self._raw_stat = 0
+        self._parsed_stat = {}
+        self._available = True
+        
+        # Identifiers
+        self._attr_unique_id = f"lince_gold_{row_id}_radio_{device_index}"
+        self._attr_name = self._device_name
+        
+        # Device class in base al tipo
+        self._attr_device_class = self._get_device_class()
+        
+        # Device info
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{row_id}_radio_devices")},
+            name=f"{centrale_name} - Sensori Radio",
+            model=f"Gold Radio",
+            via_device=(DOMAIN, str(row_id)),
+        )
+        
+        _LOGGER.debug(
+            f"[{row_id}] Created Gold radio sensor: idx={device_index}, "
+            f"name={self._device_name}, tipo={self._num_tipo}, spec={self._num_spec}"
+        )
+    
+    def _get_device_class(self) -> BinarySensorDeviceClass | None:
+        """Determina device class in base al tipo periferica."""
+        if self._num_tipo == 3:  # Contatto
+            return CONTATTO_DEVICE_CLASS.get(self._num_spec, BinarySensorDeviceClass.DOOR)
+        elif self._num_tipo == 6:  # Tecnologico
+            return TECNOLOGICO_DEVICE_CLASS.get(self._num_spec, BinarySensorDeviceClass.SAFETY)
+        else:
+            return RADIO_TYPE_DEVICE_CLASS.get(self._num_tipo)
+    
+    @property
+    def should_poll(self) -> bool:
+        return False
+    
+    @property
+    def available(self) -> bool:
+        return self._available
+    
+    @property
+    def is_on(self) -> bool | None:
+        """Ritorna True se il sensore è attivato/triggered."""
+        return self._is_triggered
+    
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Attributi extra per diagnostica."""
+        return {
+            "device_index": self._device_index,
+            "device_type": self._num_tipo,
+            "device_spec": self._num_spec,
+            "raw_stat": self._raw_stat,
+            "parsed_stat": self._parsed_stat,
+            "centrale_id": self._centrale_id,
+        }
+    
+    @property
+    def icon(self) -> str | None:
+        """Icona in base al tipo e stato."""
+        if self._num_tipo == 2:  # Movimento
+            return "mdi:motion-sensor" if self._is_triggered else "mdi:motion-sensor-off"
+        elif self._num_tipo == 3:  # Contatto
+            if self._num_spec == 1:  # Tapparella
+                return "mdi:blinds-open" if self._is_triggered else "mdi:blinds"
+            else:  # Magnetico
+                return "mdi:door-open" if self._is_triggered else "mdi:door-closed"
+        elif self._num_tipo == 6:  # Tecnologico
+            if self._num_spec == 0:  # Allagamento
+                return "mdi:water-alert" if self._is_triggered else "mdi:water-off"
+            elif self._num_spec == 1:  # Fumo
+                return "mdi:smoke-detector-alert" if self._is_triggered else "mdi:smoke-detector"
+            elif self._num_spec == 2:  # Gas
+                return "mdi:gas-cylinder" if self._is_triggered else "mdi:gas-cylinder"
+        return None
+    
+    def update_from_websocket(self, parsed_data: dict):
+        """Aggiorna lo stato dal messaggio WebSocket."""
+        self._raw_stat = parsed_data.get("raw", 0)
+        self._parsed_stat = parsed_data.get("stat", {})
+        self._is_triggered = parsed_data.get("is_triggered", False)
+        
+        _LOGGER.debug(
+            f"[{self._row_id}] Radio {self._device_index} update: "
+            f"triggered={self._is_triggered}, raw={self._raw_stat}"
+        )
+        
+        self.async_write_ha_state()
+    
+    def reset_state(self):
+        """Reset stato a non triggered."""
+        if self._is_triggered:
+            self._is_triggered = False
+            self._raw_stat = 0
+            self.async_write_ha_state()
+
+
+# Storage globale per sensori radio Gold
+_gold_radio_sensors: dict[int, dict[int, GoldRadioBinarySensor]] = {}
+
+
+def get_gold_radio_sensors(row_id: int) -> dict[int, GoldRadioBinarySensor]:
+    """Ritorna i sensori radio per una centrale."""
+    return _gold_radio_sensors.get(row_id, {})
+
+
+async def update_gold_radio_sensors(row_id: int, dev_type: str, group: int, parsed_stats: dict):
+    """
+    Callback per aggiornare i sensori radio da WebSocket.
+    Chiamato da GoldSocketClient.on_gold_dev_stats.
+    """
+    if dev_type != "radio":
+        return
+    
+    sensors = _gold_radio_sensors.get(row_id, {})
+    if not sensors:
+        _LOGGER.debug(f"[{row_id}] No radio sensors registered yet")
+        return
+    
+    for device_idx, parsed_data in parsed_stats.items():
+        sensor = sensors.get(device_idx)
+        if sensor:
+            sensor.update_from_websocket(parsed_data)
+        else:
+            _LOGGER.debug(f"[{row_id}] No sensor for radio index {device_idx}")
+
+
+def setup_gold_radio_sensors(
+    coordinator,
+    row_id: int,
+    centrale_id: str,
+    centrale_name: str,
+    physical_map: dict,
+    api
+) -> list[GoldRadioBinarySensor]:
+    """
+    Crea i binary sensors per tutti i dispositivi radio configurati.
+    
+    Args:
+        coordinator: Home Assistant coordinator
+        row_id: ID della centrale
+        centrale_id: ID centrale (id_centrale)
+        centrale_name: Nome centrale
+        physical_map: Physical map con radio[], bus[], filari[]
+        api: API instance
+    
+    Returns:
+        Lista di GoldRadioBinarySensor creati
+    """
+    global _gold_radio_sensors
+    
+    entities = []
+    radio_devices = physical_map.get("radio", [])
+    
+    if row_id not in _gold_radio_sensors:
+        _gold_radio_sensors[row_id] = {}
+    
+    for idx, device_config in enumerate(radio_devices):
+        num_tipo = device_config.get("num_tipo_periferica", 0)
+        
+        # Crea sensore solo per tipi che hanno senso come binary_sensor
+        # (movimento, contatto, tecnologico)
+        if num_tipo in (2, 3, 6):
+            sensor = GoldRadioBinarySensor(
+                coordinator=coordinator,
+                row_id=row_id,
+                centrale_id=centrale_id,
+                centrale_name=centrale_name,
+                device_index=idx,
+                device_config=device_config,
+                api=api
+            )
+            entities.append(sensor)
+            _gold_radio_sensors[row_id][idx] = sensor
+            
+            _LOGGER.info(
+                f"[{row_id}] Created radio sensor: {device_config.get('nome', f'Radio {idx}')} "
+                f"(type={num_tipo})"
+            )
+    
+    _LOGGER.info(f"[{row_id}] Created {len(entities)} Gold radio sensors")
+    return entities

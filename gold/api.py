@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 from ..common.api import CommonAPI
 from .socket_client import GoldSocketClient
 from .parser import GoldStateParser, GoldPhysicalMapParser
-from .binary_sensor import update_gold_buscomm_binarysensors
+from .binary_sensor import update_gold_buscomm_binarysensors, update_gold_radio_sensors
 from .sensor import update_gold_buscomm_sensors
+from .const import API_GOLD_LOGIN_URL, API_GOLD_SEND_COMM_URL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -137,11 +138,13 @@ class GoldAPI(CommonAPI):
     async def _on_gold_message(self, centrale_id: int, message: Any):
         """Handle Gold socket messages."""
         try:
-            _LOGGER.debug(f"Gold message from {centrale_id}: {message}")
+            _LOGGER.debug(f"Gold message from {centrale_id}: type={message.get('type') if isinstance(message, dict) else 'unknown'}")
             
             # Parse based on message type
             if isinstance(message, dict):
-                if message.get("type") == "gold_state":
+                msg_type = message.get("type", "")
+                
+                if msg_type == "gold_state":
                     # Already parsed by socket client
                     parsed_state = message.get("data", {})
                     self._states_cache[centrale_id] = parsed_state
@@ -161,6 +164,57 @@ class GoldAPI(CommonAPI):
                         self.hass.bus.async_fire(
                             "lince_gold_state_update",
                             {"centrale_id": centrale_id, "state": self._states_cache[centrale_id]}
+                        )
+                
+                elif msg_type == "gold_dev_stats":
+                    # Stato dispositivi (radio, bus, filari) via WebSocket
+                    dev_type = message.get("dev_type", "")
+                    group = message.get("group", 0)
+                    parsed_stats = message.get("parsed", {})
+                    
+                    _LOGGER.debug(
+                        f"[{centrale_id}] Gold dev stats: type={dev_type}, "
+                        f"group={group}, devices={len(parsed_stats)}"
+                    )
+                    
+                    # Aggiorna i sensori radio
+                    if dev_type == "radio" and parsed_stats:
+                        await update_gold_radio_sensors(centrale_id, dev_type, group, parsed_stats)
+                    
+                    # Notify HA
+                    if self.hass:
+                        self.hass.bus.async_fire(
+                            "lince_gold_dev_stats_update",
+                            {
+                                "centrale_id": centrale_id,
+                                "dev_type": dev_type,
+                                "group": group,
+                                "stats_count": len(parsed_stats)
+                            }
+                        )
+                
+                elif msg_type == "gold_end_sync":
+                    # Physical map ricevuta - salva in cache
+                    physical_map = message.get("physical_map", {})
+                    self._physical_maps_cache[centrale_id] = physical_map
+                    
+                    _LOGGER.info(
+                        f"[{centrale_id}] Physical map cached: "
+                        f"{len(physical_map.get('radio', []))} radio, "
+                        f"{len(physical_map.get('bus', []))} bus, "
+                        f"{len(physical_map.get('filari', []))} filari"
+                    )
+                    
+                    # Imposta la physical map nel socket client per il parsing
+                    client = self._socket_clients.get(centrale_id)
+                    if client:
+                        client.set_physical_map(physical_map)
+                    
+                    # Notify HA
+                    if self.hass:
+                        self.hass.bus.async_fire(
+                            "lince_gold_physical_map_update",
+                            {"centrale_id": centrale_id}
                         )
                         
         except Exception as e:
@@ -203,4 +257,383 @@ class GoldAPI(CommonAPI):
                 "open_zones": self._state_parser.get_open_zones()
             }
         }
+    
+    async def gold_login_with_code(self, id_centrale: str, user_code: str) -> Optional[Dict]:
+        """
+        Esegue login Gold con codice utente per ottenere configurazione completa.
+        
+        POST /api/gold/login con payload {id_centrale, code}
+        Restituisce: lm (logical map), pm (physical map) con nomi zone/dispositivi.
+        
+        Args:
+            id_centrale: ID della centrale (stringa, es. "12345678")
+            user_code: Codice utente (es. "123456")
+            
+        Returns:
+            Dict con la risposta completa o None se fallisce
+        """
+        if self.is_token_expired():
+            await self.login()
+        
+        headers = self.get_auth_header()
+        payload = {
+            "id_centrale": id_centrale,
+            "code": user_code
+        }
+        
+        try:
+            _LOGGER.debug(f"Gold login con codice per centrale {id_centrale}")
+            async with self.session.post(API_GOLD_LOGIN_URL, json=payload, headers=headers) as resp:
+                if resp.status == 401:
+                    _LOGGER.warning("Token scaduto durante gold_login_with_code, ri-autenticando...")
+                    await self.login()
+                    headers = self.get_auth_header()
+                    async with self.session.post(API_GOLD_LOGIN_URL, json=payload, headers=headers) as retry_resp:
+                        if retry_resp.status != 200:
+                            _LOGGER.error(f"Gold login con codice fallito: HTTP {retry_resp.status}")
+                            return None
+                        return await retry_resp.json()
+                        
+                elif resp.status != 200:
+                    _LOGGER.error(f"Gold login con codice fallito: HTTP {resp.status}")
+                    return None
+                
+                data = await resp.json()
+                
+                if data.get("status") != "OK":
+                    _LOGGER.error(f"Gold login con codice fallito: status={data.get('status')}")
+                    return None
+                
+                _LOGGER.info(f"Gold login con codice riuscito per centrale {id_centrale}")
+                return data
+                
+        except Exception as e:
+            _LOGGER.error(f"Errore durante gold_login_with_code: {e}", exc_info=True)
+            return None
+    
+    def parse_zone_names_from_login(self, login_data: Dict) -> Dict[str, Dict[int, str]]:
+        """
+        Estrae i nomi delle zone dalla risposta di gold_login_with_code.
+        
+        Args:
+            login_data: Risposta da gold_login_with_code
+            
+        Returns:
+            Dict con chiavi 'filari', 'radio', 'bus' contenenti {indice: nome}
+        """
+        result = {
+            "filari": {},
+            "radio": {},
+            "bus": {},
+            "zone": {},  # Zone logiche
+        }
+        
+        try:
+            pm = login_data.get("pm", {})
+            lm = login_data.get("lm", {})
+            
+            # Parse filari: array di [config_hex, nome]
+            filari = pm.get("filari", [])
+            for idx, entry in enumerate(filari):
+                if isinstance(entry, list) and len(entry) >= 2:
+                    name = entry[1].strip() if entry[1] else f"Filare {idx + 1}"
+                    # Salta nomi default "INGR. FILARE  X "
+                    if not name.startswith("INGR. FILARE"):
+                        result["filari"][idx] = name
+                    else:
+                        result["filari"][idx] = name.strip()
+            
+            # Parse radio: array di [config_hex, nome]
+            radio = pm.get("radio", [])
+            for idx, entry in enumerate(radio):
+                if isinstance(entry, list) and len(entry) >= 2:
+                    config_hex = entry[0] if entry[0] else ""
+                    name = entry[1].strip() if entry[1] else f"Radio {idx + 1}"
+                    
+                    # Salta dispositivi non configurati (pattern default)
+                    if config_hex.startswith("000700000000ffffff"):
+                        continue  # Dispositivo non configurato
+                    
+                    # Salta nomi default "DISP. RADIO  X "
+                    if name.startswith("DISP. RADIO"):
+                        continue
+                    
+                    result["radio"][idx] = name.strip()
+            
+            # Parse bus: array di [config_hex, nome]
+            bus = pm.get("bus", [])
+            for idx, entry in enumerate(bus):
+                if isinstance(entry, list) and len(entry) >= 2:
+                    config_hex = entry[0] if entry[0] else ""
+                    name = entry[1].strip() if entry[1] else f"Bus {idx + 1}"
+                    
+                    # Salta dispositivi non configurati
+                    if config_hex == "ffffff00":
+                        continue
+                    
+                    # Salta nomi default "DISP. BUS    X "
+                    if name.startswith("DISP. BUS"):
+                        continue
+                    
+                    result["bus"][idx] = name.strip()
+            
+            # Parse zone logiche da lm
+            zone_list = lm.get("zone", [])
+            for idx, zone in enumerate(zone_list):
+                if isinstance(zone, dict):
+                    name = zone.get("nome", f"Zona {idx + 1}").strip()
+                    result["zone"][idx] = name
+            
+            _LOGGER.debug(f"Parsed zone names: filari={len(result['filari'])}, "
+                         f"radio={len(result['radio'])}, bus={len(result['bus'])}, "
+                         f"zone={len(result['zone'])}")
+            
+        except Exception as e:
+            _LOGGER.error(f"Errore parsing nomi zone: {e}", exc_info=True)
+        
+        return result
+    
+    async def gold_send_comm(self, id_centrale: str, prog: int) -> bool:
+        """
+        Invia comando di attivazione/disattivazione alla centrale Gold.
+        
+        POST /api/gold/send_comm con payload {id_centrale, prog}
+        
+        Args:
+            id_centrale: ID della centrale (stringa)
+            prog: Maschera programmi da attivare:
+                  - 0 = disarm (tutti i programmi spenti)
+                  - 1 = G1
+                  - 2 = G2
+                  - 3 = G1 + G2
+                  - 4 = G3
+                  - 5 = G1 + G3
+                  - 6 = G2 + G3
+                  - 7 = G1 + G2 + G3
+                  
+        Returns:
+            True se il comando è stato inviato con successo
+            
+        Note:
+            IMPORTANTE: Prima di chiamare send_comm, devi aver chiamato
+            gold_login_with_code() per autenticare l'utente.
+        """
+        if self.is_token_expired():
+            await self.login()
+        
+        headers = self.get_auth_header()
+        payload = {
+            "id_centrale": id_centrale,
+            "prog": prog
+        }
+        
+        try:
+            _LOGGER.debug(f"Gold send_comm per centrale {id_centrale}, prog={prog}")
+            async with self.session.post(API_GOLD_SEND_COMM_URL, json=payload, headers=headers) as resp:
+                if resp.status == 401:
+                    _LOGGER.warning("Token scaduto durante gold_send_comm, ri-autenticando...")
+                    await self.login()
+                    headers = self.get_auth_header()
+                    async with self.session.post(API_GOLD_SEND_COMM_URL, json=payload, headers=headers) as retry_resp:
+                        if retry_resp.status != 200:
+                            _LOGGER.error(f"Gold send_comm fallito: HTTP {retry_resp.status}")
+                            return False
+                        _LOGGER.info(f"Gold send_comm riuscito per centrale {id_centrale}, prog={prog}")
+                        return True
+                        
+                elif resp.status != 200:
+                    _LOGGER.error(f"Gold send_comm fallito: HTTP {resp.status}")
+                    return False
+                
+                _LOGGER.info(f"Gold send_comm riuscito per centrale {id_centrale}, prog={prog}")
+                return True
+                
+        except Exception as e:
+            _LOGGER.error(f"Errore durante gold_send_comm: {e}", exc_info=True)
+            return False
+    
+    async def gold_arm_disarm(self, id_centrale: str, user_code: str, prog: int, delay_ms: int = 250) -> bool:
+        """
+        Esegue il flusso completo di arm/disarm per Gold:
+        1. Login con codice utente
+        2. Attesa breve (per sicurezza)
+        3. Invio comando send_comm
+        
+        Args:
+            id_centrale: ID della centrale
+            user_code: Codice utente per autenticazione
+            prog: Maschera programmi (0 = disarm, 1-7 = combinazioni G1/G2/G3)
+            delay_ms: Ritardo tra login e send_comm (default 250ms)
+            
+        Returns:
+            True se l'operazione è completata con successo
+        """
+        try:
+            # 1. Login con codice utente
+            _LOGGER.debug(f"Gold arm/disarm: login per centrale {id_centrale}")
+            login_result = await self.gold_login_with_code(id_centrale, user_code)
+            
+            if not login_result or login_result.get("status") != "OK":
+                _LOGGER.error(f"Gold arm/disarm: login fallito per centrale {id_centrale}")
+                return False
+            
+            # 2. Attesa breve
+            if delay_ms > 0:
+                await asyncio.sleep(delay_ms / 1000.0)
+            
+            # 3. Invio comando
+            _LOGGER.debug(f"Gold arm/disarm: send_comm prog={prog}")
+            success = await self.gold_send_comm(id_centrale, prog)
+            
+            if success:
+                action = "disarm" if prog == 0 else f"arm (prog={prog})"
+                _LOGGER.info(f"Gold {action} completato per centrale {id_centrale}")
+            
+            return success
+            
+        except Exception as e:
+            _LOGGER.error(f"Errore durante gold_arm_disarm: {e}", exc_info=True)
+            return False
+    
+    def get_physical_map(self, centrale_id: int) -> Optional[Dict]:
+        """
+        Restituisce la physical map dalla cache.
+        
+        Args:
+            centrale_id: ID della centrale
+            
+        Returns:
+            Dict con chiavi 'radio', 'bus', 'filari' o None se non disponibile
+        """
+        return self._physical_maps_cache.get(centrale_id)
+    
+    def set_physical_map(self, centrale_id: int, physical_map: Dict):
+        """
+        Imposta la physical map nella cache e nel socket client.
+        
+        Args:
+            centrale_id: ID della centrale
+            physical_map: Dict con chiavi 'radio', 'bus', 'filari'
+        """
+        self._physical_maps_cache[centrale_id] = physical_map
+        
+        # Imposta anche nel socket client per il parsing in tempo reale
+        client = self._socket_clients.get(centrale_id)
+        if client:
+            client.set_physical_map(physical_map)
+        
+        _LOGGER.info(
+            f"[{centrale_id}] Physical map set: "
+            f"{len(physical_map.get('radio', []))} radio, "
+            f"{len(physical_map.get('bus', []))} bus, "
+            f"{len(physical_map.get('filari', []))} filari"
+        )
+    
+    async def fetch_and_cache_physical_map(self, id_centrale: str, user_code: str) -> Optional[Dict]:
+        """
+        Recupera la physical map tramite login Gold e la salva in cache.
+        
+        Args:
+            id_centrale: ID della centrale (stringa)
+            user_code: Codice utente per autenticazione
+            
+        Returns:
+            Dict con la physical map parsata o None se fallisce
+        """
+        try:
+            login_data = await self.gold_login_with_code(id_centrale, user_code)
+            
+            if not login_data or login_data.get("status") != "OK":
+                _LOGGER.error(f"Impossibile recuperare physical map per {id_centrale}")
+                return None
+            
+            pm = login_data.get("pm", {})
+            
+            # Parsa la physical map nel formato usato internamente
+            physical_map = self._parse_physical_map_from_login(pm)
+            
+            # Salva in cache (usa int per centrale_id)
+            try:
+                centrale_id_int = int(id_centrale)
+            except ValueError:
+                centrale_id_int = hash(id_centrale)
+            
+            self.set_physical_map(centrale_id_int, physical_map)
+            
+            return physical_map
+            
+        except Exception as e:
+            _LOGGER.error(f"Errore durante fetch_and_cache_physical_map: {e}", exc_info=True)
+            return None
+    
+    def _parse_physical_map_from_login(self, pm: Dict) -> Dict:
+        """
+        Converte la physical map dal formato login al formato interno.
+        
+        Il formato login ha array di [config_hex, nome].
+        Il formato interno ha dict con campi parsati.
+        """
+        from .parser.physical_map import GoldPhysicalMapParser
+        
+        result = {
+            "radio": [],
+            "bus": [],
+            "filari": []
+        }
+        
+        try:
+            # Parse radio
+            for idx, entry in enumerate(pm.get("radio", [])):
+                if isinstance(entry, list) and len(entry) >= 2:
+                    config_hex = entry[0] if entry[0] else ""
+                    name = entry[1].strip() if entry[1] else f"Radio {idx}"
+                    
+                    # Parsa la configurazione hex per estrarre tipo periferica
+                    parsed = GoldPhysicalMapParser.parse_radio_config(config_hex)
+                    parsed["nome"] = name
+                    parsed["index"] = idx
+                    result["radio"].append(parsed)
+                else:
+                    result["radio"].append({
+                        "index": idx,
+                        "nome": f"Radio {idx}",
+                        "num_tipo_periferica": 0,
+                        "num_spec_periferica": 0
+                    })
+            
+            # Parse bus
+            for idx, entry in enumerate(pm.get("bus", [])):
+                if isinstance(entry, list) and len(entry) >= 2:
+                    config_hex = entry[0] if entry[0] else ""
+                    name = entry[1].strip() if entry[1] else f"Bus {idx}"
+                    
+                    parsed = GoldPhysicalMapParser.parse_bus_config(config_hex)
+                    parsed["nome"] = name
+                    parsed["index"] = idx
+                    result["bus"].append(parsed)
+                else:
+                    result["bus"].append({
+                        "index": idx,
+                        "nome": f"Bus {idx}",
+                        "num_tipo_periferica": 0
+                    })
+            
+            # Parse filari
+            for idx, entry in enumerate(pm.get("filari", [])):
+                if isinstance(entry, list) and len(entry) >= 2:
+                    name = entry[1].strip() if entry[1] else f"Filare {idx}"
+                    result["filari"].append({
+                        "index": idx,
+                        "nome": name
+                    })
+                else:
+                    result["filari"].append({
+                        "index": idx,
+                        "nome": f"Filare {idx}"
+                    })
+            
+        except Exception as e:
+            _LOGGER.error(f"Errore parsing physical map: {e}", exc_info=True)
+        
+        return result
     

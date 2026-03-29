@@ -555,3 +555,101 @@ class GoldPhysicalMapParser:
             return self._last_map.get("tel", [])
         return []
     
+    @staticmethod
+    def parse_radio_config(config_hex: str) -> Dict[str, Any]:
+        """
+        Parse configurazione radio da hex string.
+        
+        Il formato è quello della physical map Gold:
+        byte 8 = num_tipo_periferica
+        byte 9 = num_spec_periferica
+        
+        Args:
+            config_hex: Stringa esadecimale della configurazione
+            
+        Returns:
+            Dict con num_tipo_periferica, num_spec_periferica e altri campi
+        """
+        result = {
+            "num_tipo_periferica": 0,
+            "num_spec_periferica": 0,
+            "tipo_periferica": "non disponibile",
+            "specializzazione_periferica": None
+        }
+        
+        try:
+            if not config_hex or len(config_hex) < 20:
+                return result
+            
+            # Converti hex string in array di byte
+            arr = hexstring_to_array_int(config_hex, True)
+            
+            if len(arr) < 10:
+                return result
+            
+            num_tipo = arr[8] if len(arr) > 8 else 0
+            num_spec = arr[9] if len(arr) > 9 else 0
+            
+            if num_tipo == 0 or num_tipo > 8:
+                return result
+            
+            result["num_tipo_periferica"] = num_tipo
+            result["num_spec_periferica"] = num_spec
+            
+            # Nomi tipo periferica
+            if num_tipo < len(RF_PERIFERICHE):
+                result["tipo_periferica"] = RF_PERIFERICHE[num_tipo]["nome"]
+                specs = RF_PERIFERICHE[num_tipo]["specs"]
+                if num_spec < len(specs) and specs[num_spec]:
+                    result["specializzazione_periferica"] = specs[num_spec]
+            
+            # Altri campi utili
+            result["indirizzo_periferica"] = ((arr[7] << 8) + arr[6]) if len(arr) > 7 else 0
+            result["tempo_ingresso"] = arr[3] if len(arr) > 3 else 0
+            result["tempo_uscita"] = arr[4] if len(arr) > 4 else 0
+            
+        except Exception as e:
+            _LOGGER.debug(f"Error parsing radio config: {e}")
+        
+        return result
+    
+    @staticmethod
+    def parse_bus_config(config_hex: str) -> Dict[str, Any]:
+        """
+        Parse configurazione bus da hex string.
+        
+        Args:
+            config_hex: Stringa esadecimale della configurazione
+            
+        Returns:
+            Dict con identificativo, tipo, num_tipo_periferica
+        """
+        result = {
+            "identificativo": 0,
+            "tipo": "",
+            "num_tipo_periferica": 0,
+            "espansione": 0
+        }
+        
+        try:
+            if not config_hex or len(config_hex) < 8:
+                return result
+            
+            arr = hexstring_to_array_int(config_hex, True)
+            
+            if len(arr) < 4:
+                return result
+            
+            if arr[2] == 0 or arr[2] == 0xFF:
+                return result
+            
+            result["identificativo"] = ((arr[1] << 8) + arr[0])
+            result["num_tipo_periferica"] = arr[2]
+            result["tipo"] = BUS_PERIFERICHE.get(arr[2], "")
+            result["espansione"] = arr[3]
+            
+        except Exception as e:
+            _LOGGER.debug(f"Error parsing bus config: {e}")
+        
+        return result
+    

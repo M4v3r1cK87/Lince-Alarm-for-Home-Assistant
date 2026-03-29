@@ -9,6 +9,7 @@ from datetime import datetime
 
 from ..common.socket_client import BaseSocketClient
 from .parser import GoldStateParser
+from .parser.device_stat_parser import parse_radio_stat, parse_bus_stat, parse_filare_stat, get_device_type_name
 from ..const import API_SOCKET_IO_URL, DOMAIN
 from .const import SOCKET_NAMESPACE
 
@@ -30,6 +31,17 @@ class GoldSocketClient(BaseSocketClient):
         
         # Eventi Gold specifici
         self._gold_events = {}
+        
+        # Physical map e device stats per sensori
+        self._physical_map: Dict[str, Any] = {}
+        self._dev_stats: Dict[str, Dict[int, list]] = {
+            "radio": {},
+            "bus": {},
+            "filari": {}
+        }
+        
+        # Callback per aggiornamento sensori
+        self._dev_stats_callback: Optional[Callable] = None
         
         _LOGGER.info(f"[{self.centrale_id}] GoldSocketClient initialized")
     
@@ -54,8 +66,11 @@ class GoldSocketClient(BaseSocketClient):
         self.sio.on("disconnect", self.on_disconnect, namespace=namespace)
         self.sio.on("connect_error", self.on_connect_error, namespace=namespace)
         
-        # Handler specifici Gold già visti
+        # Handler specifici Gold
         self.sio.on("onGoldState", self.on_gold_state, namespace=namespace)
+        self.sio.on("onGoldDevStats", self.on_gold_dev_stats, namespace=namespace)
+        self.sio.on("onGoldSync", self.on_gold_sync, namespace=namespace)
+        self.sio.on("onGoldEndSync", self.on_gold_end_sync, namespace=namespace)
     
     # ------------------------------ Event handlers GOLD ------------------------------
     
@@ -156,6 +171,197 @@ class GoldSocketClient(BaseSocketClient):
                 self.centrale_id, 
                 {"type": "gold_state", "data": parsed if parsed is not None else data}
             )
+    
+    async def on_gold_dev_stats(self, data):
+        """
+        Handler per stato dispositivi Gold.
+        
+        Formato dati ricevuti:
+        {"type": "radio", "group": 0, "stats": [513, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}
+        """
+        timestamp = datetime.now().isoformat()
+        _LOGGER.debug(f"[{self.centrale_id}] ===== GOLD DEV STATS RECEIVED =====")
+        _LOGGER.debug(f"[{self.centrale_id}] Raw data: {data}")
+        
+        try:
+            dev_type = data.get("type", "")  # "radio", "bus", "filari"
+            group = data.get("group", 0)
+            stats = data.get("stats", [])
+            
+            _LOGGER.debug(f"[{self.centrale_id}] Type: {dev_type}, Group: {group}, Stats count: {len(stats)}")
+            
+            # Salva gli stats raw
+            if dev_type in self._dev_stats:
+                self._dev_stats[dev_type][group] = stats
+            
+            # Parsa gli stats se abbiamo la physical map
+            parsed_stats = {}
+            pm_key = dev_type if dev_type != "filari" else "filari"
+            pm_devices = self._physical_map.get(pm_key, [])
+            
+            for i, stat_value in enumerate(stats):
+                if stat_value == 0:
+                    continue  # Skip dispositivi non attivi
+                
+                global_idx = (group * 16) + i
+                
+                if dev_type == "radio" and global_idx < len(pm_devices):
+                    device_config = pm_devices[global_idx]
+                    num_tipo = device_config.get("num_tipo_periferica", 0)
+                    num_spec = device_config.get("num_spec_periferica", 0)
+                    device_name = device_config.get("nome", f"Radio {global_idx}")
+                    
+                    if num_tipo > 0:
+                        parsed = parse_radio_stat(stat_value, num_tipo, num_spec)
+                        parsed_stats[global_idx] = {
+                            "nome": device_name,
+                            "tipo": num_tipo,
+                            "tipo_nome": get_device_type_name(num_tipo, num_spec),
+                            "spec": num_spec,
+                            "raw": stat_value,
+                            "is_triggered": parsed.is_triggered(),
+                            "stat": parsed.to_dict()
+                        }
+                        _LOGGER.info(
+                            f"[{self.centrale_id}] Radio {global_idx} ({device_name}): "
+                            f"raw={stat_value}, triggered={parsed.is_triggered()}, "
+                            f"type={get_device_type_name(num_tipo, num_spec)}"
+                        )
+                
+                elif dev_type == "bus" and global_idx < len(pm_devices):
+                    device_config = pm_devices[global_idx]
+                    num_tipo = device_config.get("num_tipo_periferica", 0)
+                    device_name = device_config.get("nome", f"Bus {global_idx}")
+                    
+                    if num_tipo > 0:
+                        parsed = parse_bus_stat(stat_value, num_tipo)
+                        parsed_stats[global_idx] = {
+                            "nome": device_name,
+                            "tipo": num_tipo,
+                            "raw": stat_value,
+                            "stat": parsed.to_dict()
+                        }
+                        _LOGGER.debug(f"[{self.centrale_id}] Bus {global_idx}: {parsed.to_dict()}")
+                
+                elif dev_type == "filari":
+                    device_name = pm_devices[global_idx].get("nome", f"Filare {global_idx}") if global_idx < len(pm_devices) else f"Filare {global_idx}"
+                    parsed = parse_filare_stat(stat_value)
+                    parsed_stats[global_idx] = {
+                        "nome": device_name,
+                        "raw": stat_value,
+                        "is_triggered": parsed.is_triggered(),
+                        "stat": parsed.to_dict()
+                    }
+                    _LOGGER.debug(f"[{self.centrale_id}] Filare {global_idx}: {parsed.to_dict()}")
+            
+            # Notifica callback per aggiornare le entità
+            if self._dev_stats_callback and parsed_stats:
+                await self._dev_stats_callback(self.centrale_id, dev_type, group, parsed_stats)
+            
+            # Callback generico
+            if self.message_callback:
+                await self.message_callback(
+                    self.centrale_id,
+                    {
+                        "type": "gold_dev_stats",
+                        "dev_type": dev_type,
+                        "group": group,
+                        "stats": stats,
+                        "parsed": parsed_stats
+                    }
+                )
+                
+        except Exception as e:
+            _LOGGER.error(f"[{self.centrale_id}] Error parsing Gold dev stats: {e}", exc_info=True)
+        
+        _LOGGER.debug(f"[{self.centrale_id}] ===================================")
+        self._store_message("onGoldDevStats", data, timestamp)
+    
+    async def on_gold_sync(self, data):
+        """Handler per progresso sincronizzazione Gold."""
+        timestamp = datetime.now().isoformat()
+        _LOGGER.debug(f"[{self.centrale_id}] Gold sync progress: {data}")
+        
+        self._store_message("onGoldSync", data, timestamp)
+        
+        if self.message_callback:
+            await self.message_callback(
+                self.centrale_id,
+                {"type": "gold_sync", "data": data}
+            )
+    
+    async def on_gold_end_sync(self, data):
+        """Handler per fine sincronizzazione Gold - contiene physical map."""
+        timestamp = datetime.now().isoformat()
+        _LOGGER.info(f"[{self.centrale_id}] Gold sync completed, parsing physical map...")
+        
+        try:
+            # Il dato arriva come stringa JSON
+            if isinstance(data, str):
+                pm_data = json.loads(data)
+            else:
+                pm_data = data
+            
+            # Estrai i dispositivi dalla physical map
+            self._physical_map = {
+                "radio": pm_data.get("radio", []),
+                "bus": pm_data.get("bus", []),
+                "filari": pm_data.get("filari", [])
+            }
+            
+            _LOGGER.info(
+                f"[{self.centrale_id}] Physical map loaded: "
+                f"{len(self._physical_map['radio'])} radio, "
+                f"{len(self._physical_map['bus'])} bus, "
+                f"{len(self._physical_map['filari'])} filari"
+            )
+            
+            # Log dispositivi radio configurati
+            for idx, radio in enumerate(self._physical_map["radio"]):
+                num_tipo = radio.get("num_tipo_periferica", 0)
+                if num_tipo > 0:
+                    nome = radio.get("nome", f"Radio {idx}")
+                    tipo_nome = get_device_type_name(num_tipo, radio.get("num_spec_periferica", 0))
+                    _LOGGER.debug(f"[{self.centrale_id}] Radio {idx}: {nome} ({tipo_nome})")
+            
+            if self.message_callback:
+                await self.message_callback(
+                    self.centrale_id,
+                    {"type": "gold_end_sync", "physical_map": self._physical_map}
+                )
+                
+        except Exception as e:
+            _LOGGER.error(f"[{self.centrale_id}] Error parsing Gold physical map: {e}", exc_info=True)
+        
+        self._store_message("onGoldEndSync", data, timestamp)
+    
+    def set_physical_map(self, pm: Dict[str, Any]):
+        """Imposta la physical map manualmente (es. da API login)."""
+        self._physical_map = {
+            "radio": pm.get("radio", []),
+            "bus": pm.get("bus", []),
+            "filari": pm.get("filari", [])
+        }
+        _LOGGER.info(
+            f"[{self.centrale_id}] Physical map set: "
+            f"{len(self._physical_map['radio'])} radio, "
+            f"{len(self._physical_map['bus'])} bus, "
+            f"{len(self._physical_map['filari'])} filari"
+        )
+    
+    def set_dev_stats_callback(self, callback: Callable):
+        """Imposta callback per aggiornamento device stats."""
+        self._dev_stats_callback = callback
+    
+    def get_dev_stats(self, dev_type: str = None) -> Dict:
+        """Ritorna gli ultimi device stats ricevuti."""
+        if dev_type:
+            return self._dev_stats.get(dev_type, {})
+        return self._dev_stats
+    
+    def get_physical_map(self) -> Dict:
+        """Ritorna la physical map."""
+        return self._physical_map
     
     # ------------------------------ Utility methods ------------------------------
     

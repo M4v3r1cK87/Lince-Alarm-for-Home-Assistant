@@ -372,29 +372,60 @@ class GoldBuscommBinarySensor(CoordinatorEntity, BinarySensorEntity):
 # GOLD RADIO BINARY SENSOR - Sensori radio via WebSocket
 # ============================================================================
 
-# Mapping tipo periferica -> device class
+# Tipi di periferiche radio (da device_stat_parser.py)
+RADIO_TYPE_RADIOCOMANDO = 1
+RADIO_TYPE_MOVIMENTO = 2
+RADIO_TYPE_CONTATTO = 3
+RADIO_TYPE_SIRENA = 4
+RADIO_TYPE_USCITA = 5
+RADIO_TYPE_TECNOLOGICO = 6
+RADIO_TYPE_RIPETITORE = 7
+RADIO_TYPE_NEBBIOGENO = 8
+
+# Tipi che diventano binary_sensor
+RADIO_TYPES_BINARY_SENSOR = {
+    RADIO_TYPE_MOVIMENTO,      # PIR/Movimento
+    RADIO_TYPE_CONTATTO,       # Magnetico/Tapparella
+    RADIO_TYPE_SIRENA,         # Sirena - mostra guasto/tamper
+    RADIO_TYPE_USCITA,         # Uscita - mostra stato (read-only fino a quando non avremo API)
+    RADIO_TYPE_TECNOLOGICO,    # Allagamento/Fumo/Gas
+    RADIO_TYPE_RIPETITORE,     # Ripetitore - mostra problemi
+    RADIO_TYPE_NEBBIOGENO,     # Nebbiogeno - mostra "pronto"
+}
+
+# Tipi che diventano switch (gestiti in switch.py)
+RADIO_TYPES_SWITCH = {
+    RADIO_TYPE_USCITA,  # Uscita - controllabile
+}
+
+# Tipi che NON creano entità dirette
+RADIO_TYPES_NO_ENTITY = {
+    RADIO_TYPE_RADIOCOMANDO,  # Radiocomando - genera eventi, non stato
+}
+
+# Mapping tipo periferica -> device class primario
 RADIO_TYPE_DEVICE_CLASS = {
-    1: None,  # Radiocomando - no binary sensor
-    2: BinarySensorDeviceClass.MOTION,  # Movimento/PIR
-    3: BinarySensorDeviceClass.DOOR,  # Contatto (magnetico o tapparella)
-    4: None,  # Sirena - no binary sensor
-    5: None,  # Uscita - no binary sensor
-    6: BinarySensorDeviceClass.SAFETY,  # Tecnologico (allagamento, fumo, gas)
-    7: None,  # Ripetitore - no binary sensor
-    8: None,  # Nebbiogeno - no binary sensor
+    RADIO_TYPE_RADIOCOMANDO: None,
+    RADIO_TYPE_MOVIMENTO: BinarySensorDeviceClass.MOTION,
+    RADIO_TYPE_CONTATTO: BinarySensorDeviceClass.DOOR,
+    RADIO_TYPE_SIRENA: BinarySensorDeviceClass.PROBLEM,  # Mostra guasto
+    RADIO_TYPE_USCITA: BinarySensorDeviceClass.POWER,  # Mostra stato uscita (on/off)
+    RADIO_TYPE_TECNOLOGICO: BinarySensorDeviceClass.SAFETY,
+    RADIO_TYPE_RIPETITORE: BinarySensorDeviceClass.PROBLEM,  # Mostra problemi batteria
+    RADIO_TYPE_NEBBIOGENO: BinarySensorDeviceClass.RUNNING,  # "pronto" = running
 }
 
 # Specializzazioni tipo 6 (tecnologico)
 TECNOLOGICO_DEVICE_CLASS = {
     0: BinarySensorDeviceClass.MOISTURE,  # Allagamento
-    1: BinarySensorDeviceClass.SMOKE,  # Fumo
-    2: BinarySensorDeviceClass.GAS,  # Gas
-    3: BinarySensorDeviceClass.POWER,  # Corrente
+    1: BinarySensorDeviceClass.SMOKE,     # Fumo
+    2: BinarySensorDeviceClass.GAS,       # Gas
+    3: BinarySensorDeviceClass.POWER,     # Corrente
 }
 
 # Specializzazioni tipo 3 (contatto)
 CONTATTO_DEVICE_CLASS = {
-    0: BinarySensorDeviceClass.DOOR,  # Magnetico
+    0: BinarySensorDeviceClass.DOOR,       # Magnetico
     1: BinarySensorDeviceClass.VIBRATION,  # Tapparella/Tenda
 }
 
@@ -472,32 +503,132 @@ class GoldRadioBinarySensor(CoordinatorEntity, BinarySensorEntity):
     
     @property
     def is_on(self) -> bool | None:
-        """Ritorna True se il sensore è attivato/triggered."""
-        return self._is_triggered
+        """Ritorna True in base al tipo di sensore.
+        
+        - Movimento/Contatto/Tecnologico: True se triggered (allarme)
+        - Sirena: True se ha problemi (guasto/tamper)
+        - Uscita: True se uscita attiva
+        - Ripetitore: True se ha problemi (batteria)
+        - Nebbiogeno: True se "pronto" (ready to fog)
+        """
+        if self._num_tipo == RADIO_TYPE_SIRENA:
+            # Sirena: mostra se ha problemi
+            return self._parsed_stat.get("has_problem", False)
+        elif self._num_tipo == RADIO_TYPE_USCITA:
+            # Uscita: mostra se attiva
+            return self._parsed_stat.get("stato_uscita", False)
+        elif self._num_tipo == RADIO_TYPE_RIPETITORE:
+            # Ripetitore: mostra se batteria scarica
+            return self._parsed_stat.get("batteria_scarica", False)
+        elif self._num_tipo == RADIO_TYPE_NEBBIOGENO:
+            # Nebbiogeno: True se pronto a nebulizzare
+            return self._parsed_stat.get("pronto", False)
+        else:
+            # Movimento, Contatto, Tecnologico: triggered = allarme
+            return self._is_triggered
     
     @property
     def extra_state_attributes(self) -> dict:
-        """Attributi extra per diagnostica."""
-        return {
+        """Attributi extra per diagnostica e stato completo."""
+        attrs = {
             "device_index": self._device_index,
             "device_type": self._num_tipo,
+            "device_type_name": self._get_type_name(),
             "device_spec": self._num_spec,
             "raw_stat": self._raw_stat,
-            "parsed_stat": self._parsed_stat,
             "centrale_id": self._centrale_id,
         }
+        
+        # Aggiungi attributi specifici per tipo
+        if self._num_tipo == RADIO_TYPE_SIRENA:
+            attrs.update({
+                "tamper": self._parsed_stat.get("tamper", False),
+                "guasto": self._parsed_stat.get("guasto", False),
+                "dormiente": self._parsed_stat.get("dormiente", False),
+                "batteria_scarica": self._parsed_stat.get("batteria_scarica"),
+                "supervisione_led": self._parsed_stat.get("supervisione_led", False),
+            })
+        elif self._num_tipo == RADIO_TYPE_NEBBIOGENO:
+            attrs.update({
+                "pronto": self._parsed_stat.get("pronto", False),
+                "bombola_scarica": self._parsed_stat.get("bombola_scarica", False),
+                "rete_assente": self._parsed_stat.get("rete_assente", False),
+                "guasto": self._parsed_stat.get("guasto", False),
+                "tamper": self._parsed_stat.get("tamper", False),
+                "dormiente": self._parsed_stat.get("dormiente", False),
+                "batteria_scarica": self._parsed_stat.get("batteria_scarica"),
+            })
+        elif self._num_tipo == RADIO_TYPE_RIPETITORE:
+            attrs.update({
+                "batteria_scarica": self._parsed_stat.get("batteria_scarica"),
+            })
+        elif self._num_tipo == RADIO_TYPE_USCITA:
+            attrs.update({
+                "stato_uscita": self._parsed_stat.get("stato_uscita", False),
+                "stato_ingresso": self._parsed_stat.get("stato_ingresso", False),
+                "tamper": self._parsed_stat.get("tamper", False),
+                "dormiente": self._parsed_stat.get("dormiente", False),
+                "batteria_scarica": self._parsed_stat.get("batteria_scarica"),
+            })
+        else:
+            # Movimento, Contatto, Tecnologico
+            attrs.update({
+                "tamper": self._parsed_stat.get("tamper", False),
+                "batteria_scarica": self._parsed_stat.get("batteria_scarica"),
+                "memoria": self._parsed_stat.get("memoria", False),
+                "dormiente": self._parsed_stat.get("dormiente", False),
+            })
+        
+        return attrs
+    
+    def _get_type_name(self) -> str:
+        """Nome leggibile del tipo periferica."""
+        type_names = {
+            RADIO_TYPE_RADIOCOMANDO: "Radiocomando",
+            RADIO_TYPE_MOVIMENTO: "Movimento",
+            RADIO_TYPE_CONTATTO: "Contatto",
+            RADIO_TYPE_SIRENA: "Sirena",
+            RADIO_TYPE_USCITA: "Uscita",
+            RADIO_TYPE_TECNOLOGICO: "Tecnologico",
+            RADIO_TYPE_RIPETITORE: "Ripetitore",
+            RADIO_TYPE_NEBBIOGENO: "Nebbiogeno",
+        }
+        return type_names.get(self._num_tipo, f"Tipo {self._num_tipo}")
     
     @property
     def icon(self) -> str | None:
         """Icona in base al tipo e stato."""
-        if self._num_tipo == 2:  # Movimento
-            return "mdi:motion-sensor" if self._is_triggered else "mdi:motion-sensor-off"
-        elif self._num_tipo == 3:  # Contatto
+        is_active = self.is_on
+        
+        if self._num_tipo == RADIO_TYPE_MOVIMENTO:
+            return "mdi:motion-sensor" if is_active else "mdi:motion-sensor-off"
+        
+        elif self._num_tipo == RADIO_TYPE_CONTATTO:
             if self._num_spec == 1:  # Tapparella
-                return "mdi:blinds-open" if self._is_triggered else "mdi:blinds"
+                return "mdi:blinds-open" if is_active else "mdi:blinds"
             else:  # Magnetico
-                return "mdi:door-open" if self._is_triggered else "mdi:door-closed"
-        elif self._num_tipo == 6:  # Tecnologico
+                return "mdi:door-open" if is_active else "mdi:door-closed"
+        
+        elif self._num_tipo == RADIO_TYPE_SIRENA:
+            if is_active:  # Ha problemi
+                return "mdi:alarm-light"
+            return "mdi:alarm-light-outline"
+        
+        elif self._num_tipo == RADIO_TYPE_RIPETITORE:
+            if is_active:  # Batteria scarica / problema
+                return "mdi:access-point-network-off"
+            return "mdi:access-point-network"
+        
+        elif self._num_tipo == RADIO_TYPE_NEBBIOGENO:
+            if is_active:  # Pronto
+                return "mdi:weather-fog"
+            return "mdi:weather-sunny"  # Non pronto
+        
+        elif self._num_tipo == RADIO_TYPE_USCITA:
+            # Uscita: icona con stato ON/OFF
+            return "mdi:electric-switch" if is_active else "mdi:electric-switch-closed"
+        
+        elif self._num_tipo == RADIO_TYPE_TECNOLOGICO:
             if self._num_spec == 0:  # Allagamento
                 return "mdi:water-alert" if self._is_triggered else "mdi:water-off"
             elif self._num_spec == 1:  # Fumo
@@ -568,6 +699,14 @@ def setup_gold_radio_sensors(
     """
     Crea i binary sensors per tutti i dispositivi radio configurati.
     
+    Tipi supportati come binary_sensor:
+    - Movimento (2): mostra allarme/triggered
+    - Contatto (3): mostra aperto/chiuso
+    - Sirena (4): mostra problemi (guasto/tamper)
+    - Tecnologico (6): mostra allarme (fumo/gas/allagamento)
+    - Ripetitore (7): mostra problemi (batteria)
+    - Nebbiogeno (8): mostra "pronto"
+    
     Args:
         coordinator: Home Assistant coordinator
         row_id: ID della centrale
@@ -590,9 +729,8 @@ def setup_gold_radio_sensors(
     for idx, device_config in enumerate(radio_devices):
         num_tipo = device_config.get("num_tipo_periferica", 0)
         
-        # Crea sensore solo per tipi che hanno senso come binary_sensor
-        # (movimento, contatto, tecnologico)
-        if num_tipo in (2, 3, 6):
+        # Crea sensore solo per tipi che diventano binary_sensor
+        if num_tipo in RADIO_TYPES_BINARY_SENSOR:
             sensor = GoldRadioBinarySensor(
                 coordinator=coordinator,
                 row_id=row_id,

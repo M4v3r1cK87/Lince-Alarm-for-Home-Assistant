@@ -168,7 +168,7 @@ Riavvia Home Assistant.
 #### Pre-requisito: Certificato SSL
 
 1. Installa **[Additional CA Integration](https://github.com/Athozs/hass-additional-ca)** da HACS
-2. Copia il certificato:
+2. Copia il **[certificato SSL](lince_cloud.pem)** nella cartella `/config/additional_ca/`:
    ```bash
    mkdir -p /config/additional_ca
    cp lince_cloud.pem /config/additional_ca/
@@ -203,7 +203,7 @@ Riavvia Home Assistant.
 | Problema | Soluzione |
 |----------|-----------|
 | Errore SSL/TLS | Verifica certificato `lince_cloud.pem` |
-| WebSocket non connette | Chiudi l'app Lince Cloud |
+| WebSocket non connette | Chiudi l'app/sito Lince Cloud |
 | Centrale non risponde | Verifica PIN e stato WebSocket |
 
 ---

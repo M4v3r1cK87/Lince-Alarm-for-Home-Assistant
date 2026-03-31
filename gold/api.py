@@ -282,7 +282,7 @@ class GoldAPI(CommonAPI):
         }
         
         try:
-            _LOGGER.debug(f"Gold login con codice per centrale {id_centrale}")
+            _LOGGER.info(f"[Gold Login] Tentativo login con codice per centrale {id_centrale}")
             async with self.session.post(API_GOLD_LOGIN_URL, json=payload, headers=headers) as resp:
                 if resp.status == 401:
                     _LOGGER.warning("Token scaduto durante gold_login_with_code, ri-autenticando...")
@@ -300,11 +300,25 @@ class GoldAPI(CommonAPI):
                 
                 data = await resp.json()
                 
+                # LOG: Risposta completa per debug
+                _LOGGER.info(f"[Gold Login] Risposta server: status={data.get('status')}, "
+                            f"keys={list(data.keys())}")
+                
                 if data.get("status") != "OK":
-                    _LOGGER.error(f"Gold login con codice fallito: status={data.get('status')}")
+                    # LOG: Mostra tutto il contenuto per capire il problema
+                    _LOGGER.error(f"[Gold Login] FALLITO per centrale {id_centrale}:")
+                    _LOGGER.error(f"  - status: {data.get('status')}")
+                    _LOGGER.error(f"  - message: {data.get('message', 'nessun messaggio')}")
+                    _LOGGER.error(f"  - risposta completa: {data}")
                     return None
                 
-                _LOGGER.info(f"Gold login con codice riuscito per centrale {id_centrale}")
+                # LOG: Contenuto physical map
+                pm = data.get("pm", {})
+                _LOGGER.info(f"[Gold Login] SUCCESSO! Physical map: "
+                            f"radio={len(pm.get('radio', []))}, "
+                            f"bus={len(pm.get('bus', []))}, "
+                            f"filari={len(pm.get('filari', []))}")
+                
                 return data
                 
         except Exception as e:
@@ -582,18 +596,35 @@ class GoldAPI(CommonAPI):
         }
         
         try:
+            # LOG: Contenuto raw della pm
+            _LOGGER.info(f"[PM Parse] Parsing physical_map dal login:")
+            _LOGGER.info(f"  - radio entries: {len(pm.get('radio', []))}")
+            _LOGGER.info(f"  - bus entries: {len(pm.get('bus', []))}")
+            _LOGGER.info(f"  - filari entries: {len(pm.get('filari', []))}")
+            
             # Parse radio
             for idx, entry in enumerate(pm.get("radio", [])):
                 if isinstance(entry, list) and len(entry) >= 2:
                     config_hex = entry[0] if entry[0] else ""
                     name = entry[1].strip() if entry[1] else f"Radio {idx}"
                     
+                    # LOG: Mostra ogni entry raw (solo prime 3)
+                    if idx < 3:
+                        _LOGGER.info(f"  Radio[{idx}] raw: hex_len={len(config_hex)}, name='{name}'")
+                    
                     # Parsa la configurazione hex per estrarre tipo periferica
                     parsed = GoldPhysicalMapParser.parse_radio_config(config_hex)
                     parsed["nome"] = name
                     parsed["index"] = idx
+                    
+                    # LOG: Risultato parsing (solo prime 3)
+                    if idx < 3:
+                        _LOGGER.info(f"  Radio[{idx}] parsed: tipo={parsed.get('num_tipo_periferica', 'N/A')}, "
+                                    f"spec={parsed.get('num_spec_periferica', 'N/A')}")
+                    
                     result["radio"].append(parsed)
                 else:
+                    _LOGGER.warning(f"  Radio[{idx}]: formato non valido: {type(entry)}")
                     result["radio"].append({
                         "index": idx,
                         "nome": f"Radio {idx}",

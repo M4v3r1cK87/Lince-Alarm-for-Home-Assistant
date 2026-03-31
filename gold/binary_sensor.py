@@ -802,6 +802,20 @@ def setup_gold_radio_sensors(
     entities = []
     radio_devices = physical_map.get("radio", [])
     
+    # LOG: Debug della physical_map
+    _LOGGER.info(f"[{row_id}] setup_gold_radio_sensors: {len(radio_devices)} dispositivi radio nella physical_map")
+    
+    # LOG: Mostra tutti i tipi di dispositivi presenti
+    types_found = {}
+    for idx, device_config in enumerate(radio_devices):
+        num_tipo = device_config.get("num_tipo_periferica", 0)
+        device_name = device_config.get("nome", f"Radio {idx}")
+        types_found[num_tipo] = types_found.get(num_tipo, 0) + 1
+        _LOGGER.debug(f"[{row_id}]   Device {idx}: tipo={num_tipo}, nome='{device_name}'")
+    
+    _LOGGER.info(f"[{row_id}] Tipi dispositivi trovati: {types_found}")
+    _LOGGER.info(f"[{row_id}] Tipi supportati come binary_sensor: {RADIO_TYPES_BINARY_SENSOR}")
+    
     if row_id not in _gold_radio_sensors:
         _gold_radio_sensors[row_id] = {}
     

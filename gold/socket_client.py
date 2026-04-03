@@ -42,6 +42,9 @@ class GoldSocketClient(BaseSocketClient):
         
         # Callback per aggiornamento sensori
         self._dev_stats_callback: Optional[Callable] = None
+
+        # Debug: ultimo evento dev stats ricevuto
+        self._last_dev_stats_ts: Optional[str] = None
         
         _LOGGER.info(f"[{self.centrale_id}] GoldSocketClient initialized")
     
@@ -60,6 +63,8 @@ class GoldSocketClient(BaseSocketClient):
     def _register_handlers(self):
         """Registra TUTTI gli handler possibili per debug massivo."""
         namespace = SOCKET_NAMESPACE
+
+        _LOGGER.info(f"[{self.centrale_id}] Registrazione handler socket su namespace '{namespace}'")
         
         # Handler base
         self.sio.on("connect", self.on_connect, namespace=namespace)
@@ -71,6 +76,15 @@ class GoldSocketClient(BaseSocketClient):
         self.sio.on("onGoldDevStats", self.on_gold_dev_stats, namespace=namespace)
         self.sio.on("onGoldSync", self.on_gold_sync, namespace=namespace)
         self.sio.on("onGoldEndSync", self.on_gold_end_sync, namespace=namespace)
+
+        # Catch-all: logga qualunque evento arrivi sul namespace Gold.
+        # Utile se il backend cambia nome evento (es. onGoldDeviceStats vs onGoldDevStats).
+        self.sio.on("*", self.on_any_event, namespace=namespace)
+
+        _LOGGER.info(
+            f"[{self.centrale_id}] Handler Gold registrati: "
+            "onGoldState, onGoldDevStats, onGoldSync, onGoldEndSync, *"
+        )
     
     # ------------------------------ Event handlers GOLD ------------------------------
     
@@ -82,6 +96,10 @@ class GoldSocketClient(BaseSocketClient):
         
         _LOGGER.info(f"[{self.centrale_id}] Gold Socket.IO connected")
         _LOGGER.debug(f"[{self.centrale_id}] Connection details: namespace={SOCKET_NAMESPACE}")
+        _LOGGER.info(
+            f"[{self.centrale_id}] In ascolto eventi Gold: "
+            "onGoldState/onGoldDevStats/onGoldSync/onGoldEndSync"
+        )
         
         # Log session info
         if self.sio:
@@ -89,6 +107,30 @@ class GoldSocketClient(BaseSocketClient):
         
         if self.connect_callback:
             await self.connect_callback(self.centrale_id)
+
+        # Richiedi esplicitamente i device stats al server.
+        # Alcune implementazioni server non li mandano in automatico
+        # ma aspettano un emit del client.
+        try:
+            ns = self._get_namespace()
+            _LOGGER.warning(
+                f"[{self.centrale_id}] Emitting 'getDevStats' per richiedere stats dispositivi..."
+            )
+            await self.sio.emit("getDevStats", namespace=ns)
+        except Exception as e:
+            _LOGGER.debug(f"[{self.centrale_id}] emit getDevStats non riuscito (normale se non supportato): {e}")
+
+    async def on_any_event(self, event: str, data: Any = None):
+        """Catch-all per debug eventi socket non mappati esplicitamente."""
+        try:
+            known = {"onGoldState", "onGoldDevStats", "onGoldSync", "onGoldEndSync"}
+            if event not in known:
+                _LOGGER.debug(
+                    f"[{self.centrale_id}] [CATCH-ALL] evento socket sconosciuto: '{event}' "
+                    f"payload={str(data)[:200]}"
+                )
+        except Exception:
+            _LOGGER.debug(f"[{self.centrale_id}] Errore nel catch-all eventi", exc_info=True)
     
     async def on_disconnect(self):
         """Handler disconnessione Gold."""
@@ -180,6 +222,7 @@ class GoldSocketClient(BaseSocketClient):
         {"type": "radio", "group": 0, "stats": [513, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}
         """
         timestamp = datetime.now().isoformat()
+        self._last_dev_stats_ts = timestamp
         _LOGGER.debug(f"[{self.centrale_id}] ===== GOLD DEV STATS RECEIVED =====")
         _LOGGER.debug(f"[{self.centrale_id}] Raw data: {data}")
         

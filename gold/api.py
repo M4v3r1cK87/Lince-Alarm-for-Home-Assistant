@@ -570,7 +570,7 @@ class GoldAPI(CommonAPI):
                 f"Socket disponibili: {list(self._socket_clients.keys())}"
             )
     
-    async def fetch_and_cache_physical_map(self, id_centrale: str, user_code: str) -> Optional[Dict]:
+    async def fetch_and_cache_physical_map(self, id_centrale: str, user_code: str, row_id: int | None = None) -> Optional[Dict]:
         """
         Recupera la physical map tramite login Gold e la salva in cache.
         
@@ -593,13 +593,16 @@ class GoldAPI(CommonAPI):
             # Parsa la physical map nel formato usato internamente
             physical_map = self._parse_physical_map_from_login(pm)
             
-            # Salva in cache (usa int per centrale_id)
-            try:
-                centrale_id_int = int(id_centrale)
-            except ValueError:
-                centrale_id_int = hash(id_centrale)
-            
-            self.set_physical_map(centrale_id_int, physical_map)
+            # Salva in cache con la stessa chiave usata dal socket client (row_id),
+            # altrimenti la physical map non viene agganciata al socket giusto.
+            cache_key = row_id
+            if cache_key is None:
+                try:
+                    cache_key = int(id_centrale)
+                except ValueError:
+                    cache_key = id_centrale
+
+            self.set_physical_map(cache_key, physical_map)
             
             return physical_map
             

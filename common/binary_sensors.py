@@ -37,7 +37,7 @@ class CommonCentraleBinarySensorEntity(CoordinatorEntity, BinarySensorEntity):
         connections = {(dr.CONNECTION_NETWORK_MAC, system["mac"])} if system.get("mac") else set()
         
         return DeviceInfo(
-            identifiers={(DOMAIN, self._row_id)},
+            identifiers={(DOMAIN, str(self._row_id))},
             name=centrale_name,
             manufacturer=MANUFACTURER,
             model=system.get("model", "Unknown").strip(),
@@ -76,7 +76,7 @@ class CommonSocketConnectionSensor(BinarySensorEntity):
         self._attr_name = "Socket Connected"
         self._attr_unique_id = f"lince_{self._row_id}_socket_connected"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._row_id)}
+            identifiers={(DOMAIN, str(self._row_id))}
         )
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
 

@@ -42,7 +42,7 @@ class CommonCentraleSensorEntity(CoordinatorEntity, SensorEntity):
         connections = {(dr.CONNECTION_NETWORK_MAC, system["mac"])} if system.get("mac") else set()
         
         return DeviceInfo(
-            identifiers={(DOMAIN, self._row_id)},
+            identifiers={(DOMAIN, str(self._row_id))},
             name=centrale_name,
             manufacturer=MANUFACTURER,
             model=system.get("model", "Unknown").strip(),

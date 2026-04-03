@@ -570,6 +570,19 @@ class GoldAlarmControlPanel(CoordinatorEntity, AlarmControlPanelEntity):
                 _LOGGER.info("[Gold %s] Attivazione profilo '%s' (mask=%d) inviata, attesa conferma WS", 
                            self._row_id, profile, mask)
                 await self._send_armed_notification(profile)
+
+                # Fallback ottimistico: aggiorna subito la cache programmi.
+                # Se il WS non arriva, il pannello non resta bloccato su DISARMED.
+                state_cache = getattr(self._api, "_states_cache", None)
+                if isinstance(state_cache, dict):
+                    current = state_cache.get(self._row_id, {}) or {}
+                    prog = dict(current.get("prog", {}) or {})
+                    prog["g1"] = bool(mask & PROGRAM_BITS.get("G1", 1))
+                    prog["g2"] = bool(mask & PROGRAM_BITS.get("G2", 2))
+                    prog["g3"] = bool(mask & PROGRAM_BITS.get("G3", 4))
+                    current["prog"] = prog
+                    state_cache[self._row_id] = current
+
                 # NOTA: Lasciamo _pending_state = ARMING
                 # Lo stato ARMED_* verrà mostrato quando il WS aggiorna g1/g2/g3
                 # e alarm_state() rileva progs_any = True
@@ -612,6 +625,14 @@ class GoldAlarmControlPanel(CoordinatorEntity, AlarmControlPanelEntity):
             
             if success:
                 _LOGGER.info("[Gold %s] Disattivazione inviata, attesa conferma WS", self._row_id)
+
+                # Fallback ottimistico: azzera subito i programmi in cache.
+                state_cache = getattr(self._api, "_states_cache", None)
+                if isinstance(state_cache, dict):
+                    current = state_cache.get(self._row_id, {}) or {}
+                    current["prog"] = {"g1": False, "g2": False, "g3": False}
+                    state_cache[self._row_id] = current
+
                 # NOTA: Lasciamo _pending_state = DISARMING
                 # Lo stato DISARMED verrà mostrato quando il WS aggiorna g1/g2/g3=False
                 # e alarm_state() rileva progs_any = False

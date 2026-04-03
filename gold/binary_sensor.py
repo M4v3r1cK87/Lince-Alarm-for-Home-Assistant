@@ -115,7 +115,11 @@ def setup_gold_binary_sensors(system, coordinator, api, config_entry, hass, asyn
             if user_code and hasattr(api, 'fetch_and_cache_physical_map'):
                 id_centrale_str = str(centrale_id)
                 _LOGGER.info(f"[{row_id}] Chiamata fetch_and_cache_physical_map per centrale {id_centrale_str}...")
-                physical_map = await api.fetch_and_cache_physical_map(id_centrale_str, user_code)
+                physical_map = await api.fetch_and_cache_physical_map(
+                    id_centrale_str,
+                    user_code,
+                    row_id=row_id,
+                )
                 
                 if physical_map:
                     # LOG: contenuto physical_map

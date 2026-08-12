@@ -13,7 +13,7 @@ Integrazione Home Assistant per il controllo e monitoraggio delle centrali d'all
 
 | Centrale | Modalità Cloud | Modalità Locale (EuroNET) | Note |
 |----------|:--------------:|:-------------------------:|:----:|
-| **EuroPlus** | ✅ | ✅ | E' richiesta la versione 2.00I del modulo EuroNET |
+| **EuroPlus** | ✅ | ✅ | E' richiesta la versione firmware 2.00I del modulo EuroNET |
 | **Gold** | ✅ (beta) | ❌ |
 | **GR868** | ❌ | ✅ | Impostare intervallo di polling ad almeno 2 secondi |
 
@@ -22,6 +22,7 @@ Integrazione Home Assistant per il controllo e monitoraggio delle centrali d'all
 ## 🆕 Modalità Locale (EuroNET)
 
 Nuova modalità che sfrutta il modulo **EuroNET** (codice LINCE 4124EURONET) per una connessione diretta alla centrale via LAN, senza passare dal cloud.
+⚠️ **IMPORTANTE**: Il modulo EuroNET deve avere una versione firmware **2.00I**. Sono state eseguite delle prove con versione firwmare 1.12 è il risultato è stato che l'integrazione era incompatibile.
 
 ### ✅ Vantaggi
 

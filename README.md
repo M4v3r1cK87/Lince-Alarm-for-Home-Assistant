@@ -22,7 +22,8 @@ Integrazione Home Assistant per il controllo e monitoraggio delle centrali d'all
 ## 🆕 Modalità Locale (EuroNET)
 
 Nuova modalità che sfrutta il modulo **EuroNET** (codice LINCE 4124EURONET) per una connessione diretta alla centrale via LAN, senza passare dal cloud.
-⚠️ **IMPORTANTE**: Il modulo EuroNET deve avere una versione firmware **2.00I**. Sono state eseguite delle prove con versione firwmare 1.12 è il risultato è stato che l'integrazione era incompatibile.
+
+> ⚠️ **IMPORTANTE**: Il modulo EuroNET deve avere una versione firmware **2.00I**. Sono state eseguite delle prove con versione firwmare 1.12 è il risultato è stato che l'integrazione era incompatibile.
 
 ### ✅ Vantaggi
 

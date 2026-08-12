@@ -13,7 +13,7 @@ Integrazione Home Assistant per il controllo e monitoraggio delle centrali d'all
 
 | Centrale | Modalità Cloud | Modalità Locale (EuroNET) | Note |
 |----------|:--------------:|:-------------------------:|:----:|
-| **EuroPlus** | ✅ | ✅ |
+| **EuroPlus** | ✅ | ✅ | E' richiesta la versione 2.00I del modulo EuroNET |
 | **Gold** | ✅ (beta) | ❌ |
 | **GR868** | ❌ | ✅ | Impostare intervallo di polling ad almeno 2 secondi |
 
